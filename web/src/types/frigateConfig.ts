@@ -298,6 +298,18 @@ export interface FrigateConfig {
     retry_interval: number;
   };
 
+  genai: {
+    enabled: boolean;
+    provider: string;
+    base_url?: string;
+    api_key?: string;
+    model: string;
+    prompt: string;
+    object_prompts: { [key: string]: string };
+    required_zones: string[];
+    objects: string[];
+  };
+
   go2rtc: {
     streams: string[];
     webrtc: {
@@ -344,6 +356,11 @@ export interface FrigateConfig {
     tls_insecure: boolean | null;
     topic_prefix: string;
     user: string | null;
+  };
+
+  notifications: {
+    enabled: boolean;
+    email?: string;
   };
 
   objects: {
@@ -395,6 +412,10 @@ export interface FrigateConfig {
   };
 
   rtmp: {
+    enabled: boolean;
+  };
+
+  semantic_search: {
     enabled: boolean;
   };
 

@@ -1,5 +1,6 @@
 """Utilities for builtin types manipulation."""
 
+import ast
 import copy
 import datetime
 import logging
@@ -8,14 +9,12 @@ import queue
 import re
 import shlex
 import urllib.parse
-from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 import numpy as np
 import pytz
-import yaml
 from ruamel.yaml import YAML
 from tzlocal import get_localzone
 from zoneinfo import ZoneInfoNotFoundError
@@ -86,34 +85,6 @@ def deep_merge(dct1: dict, dct2: dict, override=False, merge_lists=False) -> dic
         else:
             merged[k] = copy.deepcopy(v2)
     return merged
-
-
-def load_config_with_no_duplicates(raw_config) -> dict:
-    """Get config ensuring duplicate keys are not allowed."""
-
-    # https://stackoverflow.com/a/71751051
-    # important to use SafeLoader here to avoid RCE
-    class PreserveDuplicatesLoader(yaml.loader.SafeLoader):
-        pass
-
-    def map_constructor(loader, node, deep=False):
-        keys = [loader.construct_object(node, deep=deep) for node, _ in node.value]
-        vals = [loader.construct_object(node, deep=deep) for _, node in node.value]
-        key_count = Counter(keys)
-        data = {}
-        for key, val in zip(keys, vals):
-            if key_count[key] > 1:
-                raise ValueError(
-                    f"Config input {key} is defined multiple times for the same field, this is not allowed."
-                )
-            else:
-                data[key] = val
-        return data
-
-    PreserveDuplicatesLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, map_constructor
-    )
-    return yaml.load(raw_config, PreserveDuplicatesLoader)
 
 
 def clean_camera_user_pass(line: str) -> str:
@@ -210,10 +181,16 @@ def update_yaml_from_url(file_path, url):
         if len(new_value_list) > 1:
             update_yaml_file(file_path, key_path, new_value_list)
         else:
-            value = str(new_value_list[0])
-
-            if value.isnumeric():
-                value = int(value)
+            value = new_value_list[0]
+            if "," in value:
+                # Skip conversion if we're a mask or zone string
+                update_yaml_file(file_path, key_path, value)
+            else:
+                try:
+                    value = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    pass
+                update_yaml_file(file_path, key_path, value)
 
             update_yaml_file(file_path, key_path, value)
 
@@ -221,12 +198,23 @@ def update_yaml_from_url(file_path, url):
 def update_yaml_file(file_path, key_path, new_value):
     yaml = YAML()
     yaml.indent(mapping=2, sequence=4, offset=2)
-    with open(file_path, "r") as f:
-        data = yaml.load(f)
+
+    try:
+        with open(file_path, "r") as f:
+            data = yaml.load(f)
+    except FileNotFoundError:
+        logger.error(
+            f"Unable to read from Frigate config file {file_path}. Make sure it exists and is readable."
+        )
+        return
 
     data = update_yaml(data, key_path, new_value)
-    with open(file_path, "w") as f:
-        yaml.dump(data, f)
+
+    try:
+        with open(file_path, "w") as f:
+            yaml.dump(data, f)
+    except Exception as e:
+        logger.error(f"Unable to write to Frigate config file {file_path}: {e}")
 
 
 def update_yaml(data, key_path, new_value):
@@ -279,37 +267,6 @@ def find_by_key(dictionary, target_key):
                 if result is not None:
                     return result
     return None
-
-
-def save_default_config(location: str) -> None:
-    try:
-        with open(location, "w") as f:
-            f.write(
-                """
-mqtt:
-  enabled: False
-
-cameras:
-  name_of_your_camera: # <------ Name the camera
-    enabled: True
-    ffmpeg:
-      inputs:
-        - path: rtsp://10.0.10.10:554/rtsp # <----- The stream you want to use for detection
-          roles:
-            - detect
-    detect:
-      enabled: False # <---- disable detection until you have a working camera feed
-      width: 1280
-      height: 720
-                    """
-            )
-    except PermissionError:
-        logger.error("Unable to write default config to /config")
-        return
-
-    logger.info(
-        "Created default config file, see the getting started docs for configuration https://docs.frigate.video/guides/getting_started"
-    )
 
 
 def get_tomorrow_at_time(hour: int) -> datetime.datetime:

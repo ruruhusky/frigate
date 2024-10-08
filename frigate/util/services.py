@@ -122,7 +122,7 @@ def get_cpu_stats() -> dict[str, dict]:
                 stats = f.readline().split()
             utime = int(stats[13])
             stime = int(stats[14])
-            starttime = int(stats[21])
+            start_time = int(stats[21])
 
             with open("/proc/uptime") as f:
                 system_uptime_sec = int(float(f.read().split()[0]))
@@ -131,9 +131,9 @@ def get_cpu_stats() -> dict[str, dict]:
 
             process_utime_sec = utime // clk_tck
             process_stime_sec = stime // clk_tck
-            process_starttime_sec = starttime // clk_tck
+            process_start_time_sec = start_time // clk_tck
 
-            process_elapsed_sec = system_uptime_sec - process_starttime_sec
+            process_elapsed_sec = system_uptime_sec - process_start_time_sec
             process_usage_sec = process_utime_sec + process_stime_sec
             cpu_average_usage = process_usage_sec * 100 // process_elapsed_sec
 
@@ -279,41 +279,70 @@ def get_intel_gpu_stats() -> dict[str, str]:
         logger.error(f"Unable to poll intel GPU stats: {p.stderr}")
         return None
     else:
-        reading = "".join(p.stdout.split())
+        data = json.loads(f'[{"".join(p.stdout.split())}]')
         results: dict[str, str] = {}
+        render = {"global": []}
+        video = {"global": []}
 
-        # render is used for qsv
-        render = []
-        for result in re.findall(r'"Render/3D/0":{[a-z":\d.,%]+}', reading):
-            packet = json.loads(result[14:])
-            single = packet.get("busy", 0.0)
-            render.append(float(single))
+        for block in data:
+            global_engine = block.get("engines")
 
-        if render:
-            render_avg = sum(render) / len(render)
-        else:
-            render_avg = 1
+            if global_engine:
+                render_frame = global_engine.get("Render/3D/0", {}).get("busy")
+                video_frame = global_engine.get("Video/0", {}).get("busy")
 
-        # video is used for vaapi
-        video = []
-        for result in re.findall('"Video/\d":{[a-z":\d.,%]+}', reading):
-            packet = json.loads(result[10:])
-            single = packet.get("busy", 0.0)
-            video.append(float(single))
+                if render_frame is not None:
+                    render["global"].append(float(render_frame))
 
-        if video:
-            video_avg = sum(video) / len(video)
-        else:
-            video_avg = 1
+                if video_frame is not None:
+                    video["global"].append(float(video_frame))
 
-        results["gpu"] = f"{round((video_avg + render_avg) / 2, 2)}%"
+            clients = block.get("clients", {})
+
+            if clients and len(clients):
+                for client_block in clients.values():
+                    key = client_block["pid"]
+
+                    if render.get(key) is None:
+                        render[key] = []
+                        video[key] = []
+
+                    client_engine = client_block.get("engine-classes", {})
+
+                    render_frame = client_engine.get("Render/3D", {}).get("busy")
+                    video_frame = client_engine.get("Video", {}).get("busy")
+
+                    if render_frame is not None:
+                        render[key].append(float(render_frame))
+
+                    if video_frame is not None:
+                        video[key].append(float(video_frame))
+
+        results["gpu"] = (
+            f"{round(((sum(render['global']) / len(render['global'])) + (sum(video['global']) / len(video['global']))) / 2, 2)}%"
+        )
         results["mem"] = "-%"
+
+        if len(render.keys()) > 1:
+            results["clients"] = {}
+
+            for key in render.keys():
+                if key == "global":
+                    continue
+
+                results["clients"][key] = (
+                    f"{round(((sum(render[key]) / len(render[key])) + (sum(video[key]) / len(video[key]))) / 2, 2)}%"
+                )
+
         return results
 
 
 def try_get_info(f, h, default="N/A"):
     try:
-        v = f(h)
+        if h:
+            v = f(h)
+        else:
+            v = f()
     except nvml.NVMLError_NotSupported:
         v = default
     return v
@@ -330,6 +359,8 @@ def get_nvidia_gpu_stats() -> dict[int, dict]:
             util = try_get_info(nvml.nvmlDeviceGetUtilizationRates, handle)
             enc = try_get_info(nvml.nvmlDeviceGetEncoderUtilization, handle)
             dec = try_get_info(nvml.nvmlDeviceGetDecoderUtilization, handle)
+            pstate = try_get_info(nvml.nvmlDeviceGetPowerState, handle, default=None)
+
             if util != "N/A":
                 gpu_util = util.gpu
             else:
@@ -356,6 +387,7 @@ def get_nvidia_gpu_stats() -> dict[int, dict]:
                 "mem": gpu_mem_util,
                 "enc": enc_util,
                 "dec": dec_util,
+                "pstate": pstate or "unknown",
             }
     except Exception:
         pass
@@ -378,11 +410,11 @@ def get_jetson_stats() -> dict[int, dict]:
     return results
 
 
-def ffprobe_stream(path: str) -> sp.CompletedProcess:
+def ffprobe_stream(ffmpeg, path: str) -> sp.CompletedProcess:
     """Run ffprobe on stream."""
     clean_path = escape_special_characters(path)
     ffprobe_cmd = [
-        "ffprobe",
+        ffmpeg.ffprobe_path,
         "-timeout",
         "1000000",
         "-print_format",
@@ -404,6 +436,31 @@ def vainfo_hwaccel(device_name: Optional[str] = None) -> sp.CompletedProcess:
         else ["vainfo", "--display", "drm", "--device", f"/dev/dri/{device_name}"]
     )
     return sp.run(ffprobe_cmd, capture_output=True)
+
+
+def get_nvidia_driver_info() -> dict[str, any]:
+    """Get general hardware info for nvidia GPU."""
+    results = {}
+    try:
+        nvml.nvmlInit()
+        deviceCount = nvml.nvmlDeviceGetCount()
+        for i in range(deviceCount):
+            handle = nvml.nvmlDeviceGetHandleByIndex(i)
+            driver = try_get_info(nvml.nvmlSystemGetDriverVersion, None, default=None)
+            cuda_compute = try_get_info(
+                nvml.nvmlDeviceGetCudaComputeCapability, handle, default=None
+            )
+            vbios = try_get_info(nvml.nvmlDeviceGetVbiosVersion, handle, default=None)
+            results[i] = {
+                "name": nvml.nvmlDeviceGetName(handle),
+                "driver": driver or "unknown",
+                "cuda_compute": cuda_compute or "unknown",
+                "vbios": vbios or "unknown",
+            }
+    except Exception:
+        pass
+    finally:
+        return results
 
 
 def auto_detect_hwaccel() -> str:
@@ -438,7 +495,9 @@ def auto_detect_hwaccel() -> str:
     return ""
 
 
-async def get_video_properties(url, get_duration=False) -> dict[str, any]:
+async def get_video_properties(
+    ffmpeg, url: str, get_duration: bool = False
+) -> dict[str, any]:
     async def calculate_duration(video: Optional[any]) -> float:
         duration = None
 
@@ -453,7 +512,7 @@ async def get_video_properties(url, get_duration=False) -> dict[str, any]:
         # if cv2 failed need to use ffprobe
         if duration is None:
             p = await asyncio.create_subprocess_exec(
-                "ffprobe",
+                ffmpeg.ffprobe_path,
                 "-v",
                 "error",
                 "-show_entries",

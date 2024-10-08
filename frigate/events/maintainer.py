@@ -5,7 +5,7 @@ from multiprocessing.synchronize import Event as MpEvent
 from typing import Dict
 
 from frigate.comms.events_updater import EventEndPublisher, EventUpdateSubscriber
-from frigate.config import EventsConfig, FrigateConfig
+from frigate.config import FrigateConfig
 from frigate.events.types import EventStateEnum, EventTypeEnum
 from frigate.models import Event
 from frigate.util.builtin import to_relative_box
@@ -54,8 +54,7 @@ class EventProcessor(threading.Thread):
         timeline_queue: Queue,
         stop_event: MpEvent,
     ):
-        threading.Thread.__init__(self)
-        self.name = "event_processor"
+        super().__init__(name="event_processor")
         self.config = config
         self.timeline_queue = timeline_queue
         self.events_in_process: Dict[str, Event] = {}
@@ -125,19 +124,19 @@ class EventProcessor(threading.Thread):
         updated_db = False
 
         # if this is the first message, just store it and continue, its not time to insert it in the db
+        if event_type == EventStateEnum.start:
+            self.events_in_process[event_data["id"]] = event_data
+
         if should_update_db(self.events_in_process[event_data["id"]], event_data):
             updated_db = True
             camera_config = self.config.cameras[camera]
-            event_config: EventsConfig = camera_config.record.events
             width = camera_config.detect.width
             height = camera_config.detect.height
             first_detector = list(self.config.detectors.values())[0]
 
-            start_time = event_data["start_time"] - event_config.pre_capture
+            start_time = event_data["start_time"]
             end_time = (
-                None
-                if event_data["end_time"] is None
-                else event_data["end_time"] + event_config.post_capture
+                None if event_data["end_time"] is None else event_data["end_time"]
             )
             # score of the snapshot
             score = (
@@ -166,11 +165,11 @@ class EventProcessor(threading.Thread):
                 )
             )
 
-            attributes = [
-                (
-                    None
-                    if event_data["snapshot"] is None
-                    else {
+            attributes = (
+                None
+                if event_data["snapshot"] is None
+                else [
+                    {
                         "box": to_relative_box(
                             width,
                             height,
@@ -179,9 +178,9 @@ class EventProcessor(threading.Thread):
                         "label": a["label"],
                         "score": a["score"],
                     }
-                )
-                for a in event_data["snapshot"]["attributes"]
-            ]
+                    for a in event_data["snapshot"]["attributes"]
+                ]
+            )
 
             # keep these from being set back to false because the event
             # may have started while recordings and snapshots were enabled
@@ -237,7 +236,7 @@ class EventProcessor(threading.Thread):
 
         if event_type == EventStateEnum.end:
             del self.events_in_process[event_data["id"]]
-            self.event_end_publisher.publish((event_data["id"], camera))
+            self.event_end_publisher.publish((event_data["id"], camera, updated_db))
 
     def handle_external_detection(
         self, event_type: EventStateEnum, event_data: Event

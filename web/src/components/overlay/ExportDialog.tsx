@@ -22,7 +22,7 @@ import { FrigateConfig } from "@/types/frigateConfig";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { TimezoneAwareCalendar } from "./ReviewActivityCalendar";
 import { SelectSeparator } from "../ui/select";
-import { isDesktop } from "react-device-detect";
+import { isDesktop, isIOS } from "react-device-detect";
 import { Drawer, DrawerContent, DrawerTrigger } from "../ui/drawer";
 import SaveExportOverlay from "./SaveExportOverlay";
 import { getUTCOffset } from "@/utils/dateUtil";
@@ -273,7 +273,7 @@ export function ExportContent({
         />
       )}
       <Input
-        className="my-6"
+        className="text-md my-6"
         type="search"
         placeholder="Name the Export"
         value={name}
@@ -431,19 +431,22 @@ function CustomTimeSelector({
           />
           <SelectSeparator className="bg-secondary" />
           <input
-            className="mx-4 w-full border border-input bg-background p-1 text-secondary-foreground hover:bg-accent hover:text-accent-foreground dark:[color-scheme:dark]"
+            className="text-md mx-4 w-full border border-input bg-background p-1 text-secondary-foreground hover:bg-accent hover:text-accent-foreground dark:[color-scheme:dark]"
             id="startTime"
             type="time"
             value={startClock}
-            step="1"
+            step={isIOS ? "60" : "1"}
             onChange={(e) => {
               const clock = e.target.value;
-              const [hour, minute, second] = clock.split(":");
+              const [hour, minute, second] = isIOS
+                ? [...clock.split(":"), "00"]
+                : clock.split(":");
+
               const start = new Date(startTime * 1000);
               start.setHours(
                 parseInt(hour),
                 parseInt(minute),
-                parseInt(second),
+                parseInt(second ?? 0),
                 0,
               );
               setRange({
@@ -493,19 +496,22 @@ function CustomTimeSelector({
           />
           <SelectSeparator className="bg-secondary" />
           <input
-            className="mx-4 w-full border border-input bg-background p-1 text-secondary-foreground hover:bg-accent hover:text-accent-foreground dark:[color-scheme:dark]"
+            className="text-md mx-4 w-full border border-input bg-background p-1 text-secondary-foreground hover:bg-accent hover:text-accent-foreground dark:[color-scheme:dark]"
             id="startTime"
             type="time"
             value={endClock}
-            step="1"
+            step={isIOS ? "60" : "1"}
             onChange={(e) => {
               const clock = e.target.value;
-              const [hour, minute, second] = clock.split(":");
-              const end = new Date(endTime * 1000);
+              const [hour, minute, second] = isIOS
+                ? [...clock.split(":"), "00"]
+                : clock.split(":");
+
+              const end = new Date(startTime * 1000);
               end.setHours(
                 parseInt(hour),
                 parseInt(minute),
-                parseInt(second),
+                parseInt(second ?? 0),
                 0,
               );
               setRange({

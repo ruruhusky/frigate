@@ -6,6 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional
 
+from frigate.camera import PTZMetrics
 from frigate.comms.config_updater import ConfigPublisher
 from frigate.config import BirdseyeModeEnum, FrigateConfig
 from frigate.const import (
@@ -14,11 +15,13 @@ from frigate.const import (
     INSERT_PREVIEW,
     REQUEST_REGION_GRID,
     UPDATE_CAMERA_ACTIVITY,
+    UPDATE_EVENT_DESCRIPTION,
+    UPDATE_MODEL_STATE,
     UPSERT_REVIEW_SEGMENT,
 )
-from frigate.models import Previews, Recordings, ReviewSegment
+from frigate.models import Event, Previews, Recordings, ReviewSegment
 from frigate.ptz.onvif import OnvifCommandEnum, OnvifController
-from frigate.types import PTZMetricsTypes
+from frigate.types import ModelStatusTypesEnum
 from frigate.util.object import get_camera_regions_grid
 from frigate.util.services import restart_frigate
 
@@ -52,7 +55,7 @@ class Dispatcher:
         config: FrigateConfig,
         config_updater: ConfigPublisher,
         onvif: OnvifController,
-        ptz_metrics: dict[str, PTZMetricsTypes],
+        ptz_metrics: dict[str, PTZMetrics],
         communicators: list[Communicator],
     ) -> None:
         self.config = config
@@ -74,20 +77,28 @@ class Dispatcher:
             "birdseye": self._on_birdseye_command,
             "birdseye_mode": self._on_birdseye_mode_command,
         }
+        self._global_settings_handlers: dict[str, Callable] = {
+            "notifications": self._on_notification_command,
+        }
 
         for comm in self.comms:
             comm.subscribe(self._receive)
 
         self.camera_activity = {}
+        self.model_state = {}
 
     def _receive(self, topic: str, payload: str) -> Optional[Any]:
         """Handle receiving of payload from communicators."""
         if topic.endswith("set"):
             try:
                 # example /cam_name/detect/set payload=ON|OFF
-                camera_name = topic.split("/")[-3]
-                command = topic.split("/")[-2]
-                self._camera_settings_handlers[command](camera_name, payload)
+                if topic.count("/") == 2:
+                    camera_name = topic.split("/")[-3]
+                    command = topic.split("/")[-2]
+                    self._camera_settings_handlers[command](camera_name, payload)
+                elif topic.count("/") == 1:
+                    command = topic.split("/")[-2]
+                    self._global_settings_handlers[command](payload)
             except IndexError:
                 logger.error(f"Received invalid set command: {topic}")
                 return
@@ -128,6 +139,22 @@ class Dispatcher:
             ).execute()
         elif topic == UPDATE_CAMERA_ACTIVITY:
             self.camera_activity = payload
+        elif topic == UPDATE_EVENT_DESCRIPTION:
+            event: Event = Event.get(Event.id == payload["id"])
+            event.data["description"] = payload["description"]
+            event.save()
+            self.publish(
+                "event_update",
+                json.dumps({"id": event.id, "description": event.data["description"]}),
+            )
+        elif topic == UPDATE_MODEL_STATE:
+            model = payload["model"]
+            state = payload["state"]
+            self.model_state[model] = ModelStatusTypesEnum[state]
+            self.publish("model_state", json.dumps(self.model_state))
+        elif topic == "modelState":
+            model_state = self.model_state.copy()
+            self.publish("model_state", json.dumps(model_state))
         elif topic == "onConnect":
             camera_status = self.camera_activity.copy()
 
@@ -235,16 +262,16 @@ class Dispatcher:
                     "Autotracking must be enabled in the config to be turned on via MQTT."
                 )
                 return
-            if not self.ptz_metrics[camera_name]["ptz_autotracker_enabled"].value:
+            if not self.ptz_metrics[camera_name].autotracker_enabled.value:
                 logger.info(f"Turning on ptz autotracker for {camera_name}")
-                self.ptz_metrics[camera_name]["ptz_autotracker_enabled"].value = True
-                self.ptz_metrics[camera_name]["ptz_start_time"].value = 0
+                self.ptz_metrics[camera_name].autotracker_enabled.value = True
+                self.ptz_metrics[camera_name].start_time.value = 0
                 ptz_autotracker_settings.enabled = True
         elif payload == "OFF":
-            if self.ptz_metrics[camera_name]["ptz_autotracker_enabled"].value:
+            if self.ptz_metrics[camera_name].autotracker_enabled.value:
                 logger.info(f"Turning off ptz autotracker for {camera_name}")
-                self.ptz_metrics[camera_name]["ptz_autotracker_enabled"].value = False
-                self.ptz_metrics[camera_name]["ptz_start_time"].value = 0
+                self.ptz_metrics[camera_name].autotracker_enabled.value = False
+                self.ptz_metrics[camera_name].start_time.value = 0
                 ptz_autotracker_settings.enabled = False
 
         self.publish(f"{camera_name}/ptz_autotracker/state", payload, retain=True)
@@ -276,6 +303,18 @@ class Dispatcher:
         motion_settings.threshold = payload  # type: ignore[union-attr]
         self.config_updater.publish(f"config/motion/{camera_name}", motion_settings)
         self.publish(f"{camera_name}/motion_threshold/state", payload, retain=True)
+
+    def _on_notification_command(self, payload: str) -> None:
+        """Callback for notification topic."""
+        if payload != "ON" and payload != "OFF":
+            f"Received unsupported value for notification: {payload}"
+            return
+
+        notification_settings = self.config.notifications
+        logger.info(f"Setting notifications: {payload}")
+        notification_settings.enabled = payload == "ON"  # type: ignore[union-attr]
+        self.config_updater.publish("config/notifications", notification_settings)
+        self.publish("notifications/state", payload, retain=True)
 
     def _on_audio_command(self, camera_name: str, payload: str) -> None:
         """Callback for audio topic."""

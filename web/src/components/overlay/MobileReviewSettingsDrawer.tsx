@@ -13,7 +13,7 @@ import { GeneralFilterContent } from "../filter/ReviewFilterGroup";
 import { toast } from "sonner";
 import axios from "axios";
 import SaveExportOverlay from "./SaveExportOverlay";
-import { isMobile } from "react-device-detect";
+import { isIOS, isMobile } from "react-device-detect";
 
 type DrawerMode = "none" | "select" | "export" | "calendar" | "filter";
 
@@ -201,21 +201,24 @@ export default function MobileReviewSettingsDrawer({
             Calendar
           </div>
         </div>
-        <ReviewActivityCalendar
-          reviewSummary={reviewSummary}
-          selectedDay={
-            filter?.after == undefined
-              ? undefined
-              : new Date(filter.after * 1000)
-          }
-          onSelect={(day) => {
-            onUpdateFilter({
-              ...filter,
-              after: day == undefined ? undefined : day.getTime() / 1000,
-              before: day == undefined ? undefined : getEndOfDayTimestamp(day),
-            });
-          }}
-        />
+        <div className="flex w-full flex-row justify-center">
+          <ReviewActivityCalendar
+            reviewSummary={reviewSummary}
+            selectedDay={
+              filter?.after == undefined
+                ? undefined
+                : new Date(filter.after * 1000)
+            }
+            onSelect={(day) => {
+              onUpdateFilter({
+                ...filter,
+                after: day == undefined ? undefined : day.getTime() / 1000,
+                before:
+                  day == undefined ? undefined : getEndOfDayTimestamp(day),
+              });
+            }}
+          />
+        </div>
         <SelectSeparator />
         <div className="flex items-center justify-center p-2">
           <Button
@@ -281,6 +284,7 @@ export default function MobileReviewSettingsDrawer({
         onCancel={() => setMode("none")}
       />
       <Drawer
+        modal={!(isIOS && drawerMode == "export")}
         open={drawerMode != "none"}
         onOpenChange={(open) => {
           if (!open) {
